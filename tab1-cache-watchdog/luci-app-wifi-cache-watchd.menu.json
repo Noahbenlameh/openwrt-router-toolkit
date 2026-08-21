@@ -1,0 +1,13 @@
+{
+    "admin/status/wifi_cache_watchd": {
+        "title": "Wi-Fi Cache Watchdog",
+        "order": 95,
+        "action": {
+            "type": "view",
+            "path": "wifi_cache_watchd"
+        },
+        "depends": {
+            "acl": [ "luci-app-wifi-cache-watchd" ]
+        }
+    }
+}

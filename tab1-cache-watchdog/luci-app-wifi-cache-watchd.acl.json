@@ -1,0 +1,15 @@
+{
+    "luci-app-wifi-cache-watchd": {
+        "description": "Grant UBUS access for the Wi-Fi Cache Watchdog LuCI status page",
+        "read": {
+            "ubus": {
+                "luci.wifi_cache_watchd": [ "status", "log" ]
+            }
+        },
+        "write": {
+            "ubus": {
+                "luci.wifi_cache_watchd": [ "action", "set_mode" ]
+            }
+        }
+    }
+}

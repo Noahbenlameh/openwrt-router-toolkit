@@ -1,0 +1,13 @@
+{
+    "admin/system/webconsole": {
+        "title": "Терминал",
+        "order": 95,
+        "action": {
+            "type": "view",
+            "path": "webconsole"
+        },
+        "depends": {
+            "acl": [ "luci-app-webconsole" ]
+        }
+    }
+}

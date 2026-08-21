@@ -1,0 +1,129 @@
+#!/bin/sh
+# rpcd plugin backing the LuCI "Wi-Fi Cache Watchdog" status page.
+# Install as /usr/libexec/rpcd/luci.wifi_cache_watchd (chmod +x).
+# Registers ubus object "luci.wifi_cache_watchd" with methods:
+#   status()          -> read-only counters + service state + current mode
+#   log()             -> tail of this tool's syslog entries
+#   action({name})    -> start|stop|enable|disable the service
+#   set_mode({mode})  -> persist cleanup scope: wifi | lan | both
+
+. /usr/share/libubox/jshn.sh
+
+INIT=/etc/init.d/wifi_cache_watchd
+TAG=wifi_cache_watchd
+LEASEFILE=/tmp/dhcp.leases
+LOGTMP=/tmp/.wcw_rpcd_logtmp
+MODE_FILE=/etc/wifi_cache_watchd.mode
+
+is_running() {
+    pgrep -f wifi_cache_watchd.sh >/dev/null 2>&1
+}
+
+is_enabled() {
+    ls /etc/rc.d/S??wifi_cache_watchd >/dev/null 2>&1
+}
+
+current_mode() {
+    M=$(cat "$MODE_FILE" 2>/dev/null)
+    case "$M" in
+        wifi|lan|both) echo "$M" ;;
+        *) echo wifi ;;
+    esac
+}
+
+do_status() {
+    CT_COUNT=$(cat /proc/sys/net/netfilter/nf_conntrack_count 2>/dev/null || echo 0)
+    CT_MAX=$(cat /proc/sys/net/netfilter/nf_conntrack_max 2>/dev/null || echo 0)
+    ARP_COUNT=$(ip neigh show 2>/dev/null | wc -l)
+    DHCP_COUNT=0
+    [ -f "$LEASEFILE" ] && DHCP_COUNT=$(wc -l < "$LEASEFILE")
+    DNS_CACHE=$(uci get dhcp.@dnsmasq[0].cachesize 2>/dev/null || echo 150)
+    LAST_EVENT=$(logread -e "$TAG" 2>/dev/null | tail -n 1)
+    HAS_CONNTRACK=0; command -v conntrack >/dev/null 2>&1 && HAS_CONNTRACK=1
+    HAS_BRIDGE=0; command -v bridge >/dev/null 2>&1 && HAS_BRIDGE=1
+
+    RUNNING=0; is_running && RUNNING=1
+    ENABLED=0; is_enabled && ENABLED=1
+
+    json_init
+    json_add_boolean running "$RUNNING"
+    json_add_boolean enabled "$ENABLED"
+    json_add_string mode "$(current_mode)"
+    json_add_boolean has_conntrack_tools "$HAS_CONNTRACK"
+    json_add_boolean has_bridge_tool "$HAS_BRIDGE"
+    json_add_int conntrack_count "$CT_COUNT"
+    json_add_int conntrack_max "$CT_MAX"
+    json_add_int arp_count "$ARP_COUNT"
+    json_add_int dhcp_leases "$DHCP_COUNT"
+    json_add_string dns_cache_size "$DNS_CACHE"
+    json_add_string last_event "$LAST_EVENT"
+    json_dump
+}
+
+do_log() {
+    # avoid a `cmd | while read` subshell (jshn state wouldn't survive it)
+    logread -e "$TAG" 2>/dev/null | tail -n 200 > "$LOGTMP"
+    json_init
+    json_add_array lines
+    while IFS= read -r L; do
+        json_add_string "" "$L"
+    done < "$LOGTMP"
+    json_close_array
+    json_dump
+    rm -f "$LOGTMP"
+}
+
+do_action() {
+    read -r INPUT
+    NAME=""
+    if command -v jsonfilter >/dev/null 2>&1; then
+        NAME=$(echo "$INPUT" | jsonfilter -e '@.name' 2>/dev/null)
+    fi
+    [ -n "$NAME" ] || NAME=$(echo "$INPUT" | sed -n 's/.*"name" *: *"\([A-Za-z]*\)".*/\1/p')
+
+    OK=0
+    case "$NAME" in
+        start|stop|enable|disable)
+            "$INIT" "$NAME" >/dev/null 2>&1 && OK=1
+            ;;
+    esac
+    json_init
+    json_add_boolean ok "$OK"
+    json_dump
+}
+
+do_set_mode() {
+    read -r INPUT
+    NEWMODE=""
+    if command -v jsonfilter >/dev/null 2>&1; then
+        NEWMODE=$(echo "$INPUT" | jsonfilter -e '@.mode' 2>/dev/null)
+    fi
+    [ -n "$NEWMODE" ] || NEWMODE=$(echo "$INPUT" | sed -n 's/.*"mode" *: *"\([a-z]*\)".*/\1/p')
+
+    OK=0
+    case "$NEWMODE" in
+        wifi|lan|both)
+            echo "$NEWMODE" > "$MODE_FILE" 2>/dev/null && OK=1
+            logger -t "$TAG" "cleanup mode changed to '$NEWMODE' via LuCI"
+            ;;
+    esac
+    json_init
+    json_add_boolean ok "$OK"
+    json_add_string mode "$(current_mode)"
+    json_dump
+}
+
+case "$1" in
+    list)
+        echo '{ "status": {}, "log": {}, "action": { "name": "str" }, "set_mode": { "mode": "str" } }'
+        ;;
+    call)
+        case "$2" in
+            status) do_status ;;
+            log) do_log ;;
+            action) do_action ;;
+            set_mode) do_set_mode ;;
+            *) echo '{}'; exit 1 ;;
+        esac
+        ;;
+esac

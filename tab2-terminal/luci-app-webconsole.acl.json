@@ -1,0 +1,18 @@
+{
+    "luci-app-webconsole": {
+        "description": "Grant UBUS access for the Терминал (web console) LuCI page",
+        "read": {
+            "ubus": {
+                "luci.webconsole": [ "status" ]
+            }
+        },
+        "write": {
+            "ubus": {
+                "luci.webconsole": [ "action" ]
+            },
+            "file": {
+                "/tmp/webconsole_upload": [ "write" ]
+            }
+        }
+    }
+}
