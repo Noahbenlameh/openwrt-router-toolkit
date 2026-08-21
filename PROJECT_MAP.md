@@ -111,7 +111,7 @@ flowchart TB
 | `clear_net_cache.sh` | `/usr/bin/clear_net_cache.sh` | Сама логика очистки: conntrack/ARP-ND/DHCP-лиза по конкретному клиенту, DNS-кэш глобально, опционально `drop_caches`. Режим (`wifi`/`lan`/`both`) читает из `/etc/wifi_cache_watchd.mode`. |
 | `wifi_cache_watchd.sh` | `/usr/sbin/wifi_cache_watchd.sh` | Демон: `logread -f`, парсит строки hostapd `AP-STA-CONNECTED`/`AP-STA-DISCONNECTED` (не ubus — см. «Грабли», п.9) + MAC клиента, дебаунс по MAC (1 сек, схлопывает быстрые переподключения), вызывает `clear_net_cache.sh`. Также пишет/чистит `/tmp/.wcw_connected/<mac>` (timestamp коннекта) для расчёта аптайма в списке клиентов. |
 | `wifi_cache_watchd.init` | `/etc/init.d/wifi_cache_watchd` | procd-автозапуск демона. |
-| `luci.wifi_cache_watchd` | `/usr/libexec/rpcd/luci.wifi_cache_watchd` | rpcd-плагин, ubus-объект `luci.wifi_cache_watchd`: `status`, `log`, `action` (start/stop/enable/disable), `set_mode`, `clients` (полный список Wi-Fi+LAN клиентов: MAC/IP/hostname/сигнал/скорость/аптайм/лиза; Wi-Fi-данные через `ubus call iwinfo assoclist`/`info`, LAN — через `bridge fdb` + `dhcp.leases`). |
+| `luci.wifi_cache_watchd` | `/usr/libexec/rpcd/luci.wifi_cache_watchd` | rpcd-плагин, ubus-объект `luci.wifi_cache_watchd`: `status`, `log`, `action` (start/stop/enable/disable), `set_mode`, `clients` — полный список Wi-Fi+LAN клиентов, всё пассивно (без обращения к самому устройству): MAC/IP/hostname/аптайм/лиза, для Wi-Fi ещё канал/частота/SSID (`iwinfo info`), PHY-детали rx/tx (MCS/ширина канала/SGI/потоки, из `iwinfo assoclist`), 802.11-возможности устройства (HT/VHT/HE/WMM/MFP, best-effort из `hostapd.<iface> get_clients`), число и список активных соединений (`conntrack -L -s <ip>`). LAN — классификация через `bridge fdb` + `dhcp.leases`. |
 | `luci-app-wifi-cache-watchd.acl.json` | `/usr/share/rpcd/acl.d/luci-app-wifi-cache-watchd.json` | ACL для ubus-методов выше. |
 | `luci-app-wifi-cache-watchd.menu.json` | `/usr/share/luci/menu.d/luci-app-wifi-cache-watchd.json` | Пункт меню `Status → Wi-Fi Cache Watchdog`. |
 | `wifi_cache_watchd.js` | `/www/luci-static/resources/view/wifi_cache_watchd.js` | Страница LuCI: пояснение (RU), статус/автозапуск, переключатель режима, таблица живых счётчиков, список подключённых устройств с раскрывающимися по клику строками (полные характеристики: сигнал/шум, rx/tx rate, аптайм, лиза), live-лог. |
@@ -359,6 +359,18 @@ rm -f /tmp/luci-indexcache*
     два разных демона, а на самом деле один логический процесс в двух
     телах. Авторитетный источник числа реальных инстансов —
     `ubus call service list '{"name":"<имя-сервиса>"}'`, а не `ps`.
+11. **Таб — плохой разделитель полей для `read`, если среди полей могут
+    быть пустые.** POSIX-правило: символы табуляции/пробела/перевода строки
+    в `$IFS` — это "IFS whitespace", и НЕСКОЛЬКО таких символов подряд
+    схлопываются в один разделитель, а не дают пустое поле между ними.
+    Строка с двумя пустыми полями подряд (например LAN-клиент без
+    Wi-Fi-специфичных данных: `lan\tMAC\t\t\t0\t0...`) при чтении через
+    `IFS=<tab> read` сдвигает все поля после пропуска, а не оставляет их
+    пустыми. Раньше это не всплывало (везде были дефолтные непустые
+    значения), но всплыло в `clients()`, когда появились реально пустые
+    LAN-строки. Решение — печатаемый не-whitespace разделитель (`|`),
+    который так себя не ведёт; см. `join_tab_to()`/`CLIENTS_SEP` в
+    `luci.wifi_cache_watchd`.
 
 ---
 

@@ -123,18 +123,84 @@ classify_mac() {
     echo lan
 }
 
+# Appends args to a file as one record per line, separated by CLIENTS_SEP.
+# Uses a plain "|" rather than a tab: POSIX read/IFS treats tab as "IFS
+# whitespace" and collapses consecutive delimiters, which silently eats
+# empty fields (e.g. a LAN row's empty iface/ssid columns) and misaligns
+# every field after them. A printable non-whitespace separator avoids that
+# entirely -- also safer than hand-counting %s placeholders in a long
+# printf format string.
+CLIENTS_SEP='|'
+join_tab_to() {
+    _dest="$1"; shift
+    _first=1
+    for _v in "$@"; do
+        if [ "$_first" = 1 ]; then
+            printf '%s' "$_v"
+            _first=0
+        else
+            printf '%s%s' "$CLIENTS_SEP" "$_v"
+        fi
+    done >> "$_dest"
+    printf '\n' >> "$_dest"
+}
+
+# Formats a PHY rate (kbit/s, from iwinfo) plus its MCS/channel-width/guard
+# interval/spatial-stream count into one human string, e.g.
+# "866.7 Mbit/s (MCS9, 40MHz, SGI, 2ss)". All-passive: these are values the
+# driver already measured on frames the client itself sent/received, no
+# extra query is made of the device.
+phy_str() {
+    _rate="$1"; _mcs="$2"; _w40="$3"; _sgi="$4"; _nss="$5"
+    if [ -z "$_rate" ] || [ "$_rate" = "0" ]; then
+        echo "-"
+        return
+    fi
+    _mbit=$(awk -v r="$_rate" 'BEGIN{printf "%.1f", r/1000}' 2>/dev/null)
+    [ -n "$_mbit" ] || _mbit="?"
+    _extra=""
+    if [ -n "$_mcs" ] && [ "$_mcs" != "-1" ]; then
+        _extra="MCS$_mcs"
+    fi
+    case "$_w40" in
+        1|true) _extra="${_extra:+$_extra, }40MHz" ;;
+    esac
+    case "$_sgi" in
+        1|true) _extra="${_extra:+$_extra, }SGI" ;;
+    esac
+    if [ -n "$_nss" ] && [ "$_nss" != "0" ]; then
+        _extra="${_extra:+$_extra, }${_nss}ss"
+    fi
+    if [ -n "$_extra" ]; then
+        echo "$_mbit Mbit/s ($_extra)"
+    else
+        echo "$_mbit Mbit/s"
+    fi
+}
+
 do_clients() {
     : > "$CLIENTS_RAW"
     WIFI_IFACES=$(ubus list 2>/dev/null | sed -n 's/^hostapd\.//p')
     SEEN_MACS=""
 
     for IFACE in $WIFI_IFACES; do
-        SSID=""
+        SSID=""; CHANNEL=0; FREQ=0; HTMODE=""
         SI_JSON=$(ubus call iwinfo info "{\"device\":\"$IFACE\"}" 2>/dev/null)
         if [ -n "$SI_JSON" ]; then
             json_load "$SI_JSON"
             json_get_var SSID ssid
+            json_get_var CHANNEL channel
+            json_get_var FREQ frequency
+            json_get_var HTMODE htmode
         fi
+
+        # Best-effort per-client 802.11 capability flags straight from
+        # hostapd's own record of what the client advertised when it
+        # associated -- not a new query to the device, just reading what
+        # hostapd already has. May be unsupported on some builds (same
+        # class of limitation as the ubus notify issue found earlier); if
+        # the call fails, the fields below just stay empty.
+        GC_JSON=$(ubus call "hostapd.$IFACE" get_clients 2>/dev/null)
 
         AL_JSON=$(ubus call iwinfo assoclist "{\"device\":\"$IFACE\"}" 2>/dev/null)
         [ -n "$AL_JSON" ] || continue
@@ -159,13 +225,33 @@ do_clients() {
 
             RXRATE=$(printf '%s' "$AL_JSON" | jsonfilter -e "@.results[$K].rx.rate" 2>/dev/null)
             TXRATE=$(printf '%s' "$AL_JSON" | jsonfilter -e "@.results[$K].tx.rate" 2>/dev/null)
+            RXMCS=$(printf '%s' "$AL_JSON" | jsonfilter -e "@.results[$K].rx.mcs" 2>/dev/null)
+            TXMCS=$(printf '%s' "$AL_JSON" | jsonfilter -e "@.results[$K].tx.mcs" 2>/dev/null)
+            RX40=$(printf '%s' "$AL_JSON" | jsonfilter -e "@.results[$K].rx.40mhz" 2>/dev/null)
+            TX40=$(printf '%s' "$AL_JSON" | jsonfilter -e "@.results[$K].tx.40mhz" 2>/dev/null)
+            RXSGI=$(printf '%s' "$AL_JSON" | jsonfilter -e "@.results[$K].rx.short_gi" 2>/dev/null)
+            TXSGI=$(printf '%s' "$AL_JSON" | jsonfilter -e "@.results[$K].tx.short_gi" 2>/dev/null)
+            RXNSS=$(printf '%s' "$AL_JSON" | jsonfilter -e "@.results[$K].rx.nss" 2>/dev/null)
+            TXNSS=$(printf '%s' "$AL_JSON" | jsonfilter -e "@.results[$K].tx.nss" 2>/dev/null)
+
+            RXPHY=$(phy_str "$RXRATE" "$RXMCS" "$RX40" "$RXSGI" "$RXNSS")
+            TXPHY=$(phy_str "$TXRATE" "$TXMCS" "$TX40" "$TXSGI" "$TXNSS")
+
+            HT=""; VHT=""; HE=""; WMM=""; MFP=""
+            if [ -n "$GC_JSON" ]; then
+                HT=$(printf '%s' "$GC_JSON" | jsonfilter -e "@.clients[\"$MAC\"].ht" 2>/dev/null)
+                VHT=$(printf '%s' "$GC_JSON" | jsonfilter -e "@.clients[\"$MAC\"].vht" 2>/dev/null)
+                HE=$(printf '%s' "$GC_JSON" | jsonfilter -e "@.clients[\"$MAC\"].he" 2>/dev/null)
+                WMM=$(printf '%s' "$GC_JSON" | jsonfilter -e "@.clients[\"$MAC\"].wmm" 2>/dev/null)
+                MFP=$(printf '%s' "$GC_JSON" | jsonfilter -e "@.clients[\"$MAC\"].mfp" 2>/dev/null)
+            fi
 
             SINCE_KEY=$(printf '%s' "$NMAC" | tr -dc 'a-z0-9')
             CSINCE=$(cat "$CONNECTED_DIR/$SINCE_KEY" 2>/dev/null || echo 0)
 
-            printf 'wifi\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
-                "$NMAC" "$IFACE" "$SSID" "${SIGNAL:-0}" "${NOISE:-0}" "${RXRATE:-0}" "${TXRATE:-0}" "${INACTIVE:-0}" "${CSINCE:-0}" \
-                >> "$CLIENTS_RAW"
+            join_tab_to "$CLIENTS_RAW" wifi "$NMAC" "$IFACE" "$SSID" "${SIGNAL:-0}" "${NOISE:-0}" \
+                "$RXPHY" "$TXPHY" "${INACTIVE:-0}" "${CSINCE:-0}" "${CHANNEL:-0}" "${FREQ:-0}" \
+                "$HTMODE" "$HT" "$VHT" "$HE" "$WMM" "$MFP"
         done
     done
 
@@ -178,14 +264,13 @@ do_clients() {
             esac
             CLASS=$(classify_mac "$NMAC")
             [ "$CLASS" = "lan" ] || continue
-            printf 'lan\t%s\t\t\t0\t0\t0\t0\t0\t0\n' "$NMAC" >> "$CLIENTS_RAW"
+            join_tab_to "$CLIENTS_RAW" lan "$NMAC" "" "" 0 0 "" "" 0 0 0 0 "" "" "" "" "" ""
         done < "$LEASEFILE"
     fi
 
-    TAB=$(printf '\t')
     json_init
     json_add_array clients
-    while IFS="$TAB" read -r TYPE MAC IFACE SSID SIGNAL NOISE RXRATE TXRATE INACTIVE CSINCE; do
+    while IFS="$CLIENTS_SEP" read -r TYPE MAC IFACE SSID SIGNAL NOISE RXPHY TXPHY INACTIVE CSINCE CHANNEL FREQ HTMODE HT VHT HE WMM MFP; do
         [ -n "$MAC" ] || continue
         IP=""; HOST=""; LEXPIRES=0
         if [ -f "$LEASEFILE" ]; then
@@ -198,6 +283,22 @@ do_clients() {
             fi
         fi
 
+        # Active outbound sessions for this client, from conntrack -- purely
+        # reading the router's own NAT state table, no traffic sent to the
+        # device to produce this.
+        CONNCOUNT=0; CONNLIST=""
+        if [ -n "$IP" ] && command -v conntrack >/dev/null 2>&1; then
+            CONNCOUNT=$(conntrack -L -s "$IP" 2>/dev/null | wc -l)
+            CONNLIST=$(conntrack -L -s "$IP" 2>/dev/null | head -n 5 | awk '{
+                dst=""; dport="";
+                for (i=1;i<=NF;i++) {
+                    if ($i ~ /^dst=/) dst=substr($i,5);
+                    if ($i ~ /^dport=/) dport=substr($i,7);
+                }
+                if (dst != "") { if (dport != "") print dst":"dport; else print dst }
+            }' | tr '\n' ',' | sed 's/,$//')
+        fi
+
         json_add_object ""
         json_add_string mac "$MAC"
         json_add_string type "$TYPE"
@@ -207,11 +308,21 @@ do_clients() {
         json_add_string hostname "$HOST"
         json_add_int signal "${SIGNAL:-0}"
         json_add_int noise "${NOISE:-0}"
-        json_add_int rx_rate_kbit "${RXRATE:-0}"
-        json_add_int tx_rate_kbit "${TXRATE:-0}"
+        json_add_string rx_phy "$RXPHY"
+        json_add_string tx_phy "$TXPHY"
         json_add_int inactive_ms "${INACTIVE:-0}"
         json_add_int connected_since "${CSINCE:-0}"
         json_add_int lease_expires "${LEXPIRES:-0}"
+        json_add_int channel "${CHANNEL:-0}"
+        json_add_int frequency "${FREQ:-0}"
+        json_add_string htmode "$HTMODE"
+        json_add_string cap_ht "$HT"
+        json_add_string cap_vht "$VHT"
+        json_add_string cap_he "$HE"
+        json_add_string cap_wmm "$WMM"
+        json_add_string cap_mfp "$MFP"
+        json_add_int conn_count "${CONNCOUNT:-0}"
+        json_add_string conn_list "$CONNLIST"
         json_close_object
     done < "$CLIENTS_RAW"
     json_close_array

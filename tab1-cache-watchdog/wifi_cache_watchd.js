@@ -31,11 +31,6 @@ var callClients = rpc.declare({
 	method: 'clients'
 });
 
-function fmtRate(kbit) {
-	kbit = kbit || 0;
-	return kbit > 0 ? (kbit / 1000).toFixed(1) + ' Mbit/s' : '-';
-}
-
 function fmtDuration(sec) {
 	sec = Math.max(0, Math.floor(sec));
 	var h = Math.floor(sec / 3600);
@@ -169,13 +164,22 @@ return view.extend({
 			];
 			if (c.type === 'wifi') {
 				rows.push([ _('SSID'), c.ssid || '-' ]);
+				rows.push([ _('Channel / frequency'), (c.channel || '-') + ' / ' + (c.frequency ? c.frequency + ' MHz' : '-') + (c.htmode ? ' (' + c.htmode + ')' : '') ]);
 				rows.push([ _('Signal / noise'), c.signal + ' dBm / ' + c.noise + ' dBm (SNR ' + (c.signal - c.noise) + ')' ]);
-				rows.push([ _('RX rate'), fmtRate(c.rx_rate_kbit) ]);
-				rows.push([ _('TX rate'), fmtRate(c.tx_rate_kbit) ]);
+				rows.push([ _('RX PHY'), c.rx_phy || '-' ]);
+				rows.push([ _('TX PHY'), c.tx_phy || '-' ]);
 				rows.push([ _('Inactive for'), fmtMs(c.inactive_ms) ]);
 				rows.push([ _('Connected since'), fmtSince(c.connected_since) ]);
+				var caps = [];
+				if (c.cap_ht === 'true') caps.push('HT (802.11n)');
+				if (c.cap_vht === 'true') caps.push('VHT (802.11ac)');
+				if (c.cap_he === 'true') caps.push('HE (802.11ax)');
+				if (c.cap_wmm === 'true') caps.push('WMM');
+				if (c.cap_mfp === 'true') caps.push('MFP');
+				rows.push([ _('Device 802.11 capabilities'), caps.length ? caps.join(', ') : _('unavailable on this hostapd build') ]);
 			}
 			rows.push([ _('DHCP lease expires'), fmtEpoch(c.lease_expires) ]);
+			rows.push([ _('Active connections (conntrack)'), (c.conn_count || 0) + (c.conn_list ? ' - ' + c.conn_list : '') ]);
 
 			var dl = E('div', { 'style': 'padding:8px 16px; background:rgba(128,128,128,0.08);' },
 				rows.map(function (r) {
