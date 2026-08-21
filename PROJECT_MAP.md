@@ -11,6 +11,8 @@ Cudy TR3000 128MB — совместимое железо). Роутер исп�
 Репозиторий: **https://github.com/Noahbenlameh/openwrt-router-toolkit**
 (публичный, ветка `master`).
 
+Автор: [Noahbenlameh](https://github.com/Noahbenlameh).
+
 ---
 
 ## 0. Самый быстрый способ поставить обе вкладки сразу

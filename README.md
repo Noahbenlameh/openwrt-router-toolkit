@@ -37,3 +37,7 @@ sh install.sh
   обновления вручную (без `install.sh`), только команды.
 - `tab1-cache-watchdog/INSTALL.md`, `tab2-terminal/INSTALL.md` — инструкции
   по каждой вкладке отдельно.
+
+## Автор
+
+Спроектировано и разработано [Noahbenlameh](https://github.com/Noahbenlameh).
