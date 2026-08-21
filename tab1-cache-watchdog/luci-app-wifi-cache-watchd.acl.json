@@ -3,7 +3,7 @@
         "description": "Grant UBUS access for the Wi-Fi Cache Watchdog LuCI status page",
         "read": {
             "ubus": {
-                "luci.wifi_cache_watchd": [ "status", "log" ]
+                "luci.wifi_cache_watchd": [ "status", "log", "clients" ]
             }
         },
         "write": {

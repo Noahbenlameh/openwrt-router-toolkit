@@ -26,6 +26,41 @@ var callSetMode = rpc.declare({
 	params: [ 'mode' ]
 });
 
+var callClients = rpc.declare({
+	object: 'luci.wifi_cache_watchd',
+	method: 'clients'
+});
+
+function fmtRate(kbit) {
+	kbit = kbit || 0;
+	return kbit > 0 ? (kbit / 1000).toFixed(1) + ' Mbit/s' : '-';
+}
+
+function fmtDuration(sec) {
+	sec = Math.max(0, Math.floor(sec));
+	var h = Math.floor(sec / 3600);
+	var m = Math.floor((sec % 3600) / 60);
+	var s = sec % 60;
+	if (h > 0) return h + 'h ' + m + 'm';
+	if (m > 0) return m + 'm ' + s + 's';
+	return s + 's';
+}
+
+function fmtSince(epoch) {
+	if (!epoch) return '-';
+	return fmtDuration(Date.now() / 1000 - epoch) + ' ' + _('ago');
+}
+
+function fmtMs(ms) {
+	ms = ms || 0;
+	return ms >= 1000 ? (ms / 1000).toFixed(1) + ' s' : ms + ' ms';
+}
+
+function fmtEpoch(epoch) {
+	if (!epoch) return '-';
+	return new Date(epoch * 1000).toLocaleString();
+}
+
 var MODES = [
 	{ key: 'wifi', label: _('Only Wi-Fi') },
 	{ key: 'lan', label: _('Only LAN') },
@@ -102,6 +137,75 @@ return view.extend({
 			logBox.scrollTop = logBox.scrollHeight;
 		}
 
+		var clientsBody = E('tbody', {});
+		var expanded = {};
+
+		function detailRow(c) {
+			var rows = [
+				[ _('MAC'), c.mac ],
+				[ _('IP'), c.ip || '-' ],
+				[ _('Hostname'), c.hostname || '-' ],
+				[ _('Type'), c.type === 'wifi' ? _('Wi-Fi') : _('LAN (wired)') ],
+				[ _('Interface'), c.iface || '-' ]
+			];
+			if (c.type === 'wifi') {
+				rows.push([ _('SSID'), c.ssid || '-' ]);
+				rows.push([ _('Signal / noise'), c.signal + ' dBm / ' + c.noise + ' dBm (SNR ' + (c.signal - c.noise) + ')' ]);
+				rows.push([ _('RX rate'), fmtRate(c.rx_rate_kbit) ]);
+				rows.push([ _('TX rate'), fmtRate(c.tx_rate_kbit) ]);
+				rows.push([ _('Inactive for'), fmtMs(c.inactive_ms) ]);
+				rows.push([ _('Connected since'), fmtSince(c.connected_since) ]);
+			}
+			rows.push([ _('DHCP lease expires'), fmtEpoch(c.lease_expires) ]);
+
+			var dl = E('div', { 'style': 'padding:8px 16px; background:rgba(128,128,128,0.08);' },
+				rows.map(function (r) {
+					return E('div', { 'style': 'display:flex; gap:8px; padding:2px 0;' }, [
+						E('div', { 'style': 'width:180px; opacity:0.7;' }, r[0]),
+						E('div', {}, String(r[1]))
+					]);
+				})
+			);
+
+			return E('tr', {}, [
+				E('td', { 'colspan': '5' }, dl)
+			]);
+		}
+
+		function paintClients(res) {
+			var list = (res && res.clients) || [];
+			clientsBody.innerHTML = '';
+
+			if (!list.length) {
+				clientsBody.appendChild(E('tr', {}, [
+					E('td', { 'colspan': '5', 'class': 'td' }, _('no clients known yet'))
+				]));
+				return;
+			}
+
+			list.forEach(function (c) {
+				var isOpen = !!expanded[c.mac];
+				var arrow = E('span', {}, isOpen ? '▾ ' : '▸ ');
+
+				var mainRow = E('tr', {
+					'style': 'cursor:pointer;',
+					'click': function () {
+						expanded[c.mac] = !expanded[c.mac];
+						paintClients(res);
+					}
+				}, [
+					E('td', { 'class': 'td left' }, [ arrow, c.mac ]),
+					E('td', { 'class': 'td left' }, c.type === 'wifi' ? _('Wi-Fi') : _('LAN')),
+					E('td', { 'class': 'td left' }, c.ip || '-'),
+					E('td', { 'class': 'td left' }, c.hostname || '-'),
+					E('td', { 'class': 'td left' }, c.type === 'wifi' ? (c.signal + ' dBm') : '-')
+				]);
+
+				clientsBody.appendChild(mainRow);
+				if (isOpen) clientsBody.appendChild(detailRow(c));
+			});
+		}
+
 		function doAction(name) {
 			return callAction(name).then(function () {
 				return callStatus().then(paintStatus);
@@ -157,7 +261,21 @@ return view.extend({
 			])
 		]);
 
+		var clientsTable = E('table', { 'class': 'table' }, [
+			E('thead', {}, [
+				E('tr', { 'class': 'tr table-titles' }, [
+					E('th', { 'class': 'th' }, _('MAC')),
+					E('th', { 'class': 'th' }, _('Type')),
+					E('th', { 'class': 'th' }, _('IP')),
+					E('th', { 'class': 'th' }, _('Hostname')),
+					E('th', { 'class': 'th' }, _('Signal'))
+				])
+			]),
+			clientsBody
+		]);
+
 		paintStatus(initialStatus);
+		paintClients({ clients: [] });
 
 		poll.add(function () {
 			return callStatus().then(paintStatus);
@@ -166,6 +284,10 @@ return view.extend({
 		poll.add(function () {
 			return callLog().then(paintLog);
 		}, 2);
+
+		poll.add(function () {
+			return callClients().then(paintClients);
+		}, 4);
 
 		return E('div', {}, [
 			E('h2', {}, _('Wi-Fi Cache Watchdog')),
@@ -196,6 +318,11 @@ return view.extend({
 			E('div', { 'class': 'cbi-section' }, [
 				E('h3', {}, _('Live cache state')),
 				table
+			]),
+			E('div', { 'class': 'cbi-section' }, [
+				E('h3', {}, _('Подключённые устройства')),
+				E('p', { 'class': 'cbi-value-description' }, _('Клик по строке раскрывает полные характеристики устройства.')),
+				clientsTable
 			]),
 			E('div', { 'class': 'cbi-section' }, [
 				E('h3', {}, _('Live event log')),

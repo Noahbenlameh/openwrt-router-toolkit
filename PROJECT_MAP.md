@@ -109,12 +109,12 @@ flowchart TB
 | Файл в папке | Путь на роутере | Роль |
 |---|---|---|
 | `clear_net_cache.sh` | `/usr/bin/clear_net_cache.sh` | Сама логика очистки: conntrack/ARP-ND/DHCP-лиза по конкретному клиенту, DNS-кэш глобально, опционально `drop_caches`. Режим (`wifi`/`lan`/`both`) читает из `/etc/wifi_cache_watchd.mode`. |
-| `wifi_cache_watchd.sh` | `/usr/sbin/wifi_cache_watchd.sh` | Демон: `ubus listen 'hostapd.*'`, парсит assoc/disassoc + MAC клиента, дебаунс по MAC (1 сек, схлопывает быстрые переподключения), вызывает `clear_net_cache.sh`. |
+| `wifi_cache_watchd.sh` | `/usr/sbin/wifi_cache_watchd.sh` | Демон: `ubus listen 'hostapd.*'`, парсит assoc/disassoc + MAC клиента, дебаунс по MAC (1 сек, схлопывает быстрые переподключения), вызывает `clear_net_cache.sh`. Также пишет/чистит `/tmp/.wcw_connected/<mac>` (timestamp коннекта) для расчёта аптайма в списке клиентов. |
 | `wifi_cache_watchd.init` | `/etc/init.d/wifi_cache_watchd` | procd-автозапуск демона. |
-| `luci.wifi_cache_watchd` | `/usr/libexec/rpcd/luci.wifi_cache_watchd` | rpcd-плагин, ubus-объект `luci.wifi_cache_watchd`: `status`, `log`, `action` (start/stop/enable/disable), `set_mode`. |
+| `luci.wifi_cache_watchd` | `/usr/libexec/rpcd/luci.wifi_cache_watchd` | rpcd-плагин, ubus-объект `luci.wifi_cache_watchd`: `status`, `log`, `action` (start/stop/enable/disable), `set_mode`, `clients` (полный список Wi-Fi+LAN клиентов: MAC/IP/hostname/сигнал/скорость/аптайм/лиза; Wi-Fi-данные через `ubus call iwinfo assoclist`/`info`, LAN — через `bridge fdb` + `dhcp.leases`). |
 | `luci-app-wifi-cache-watchd.acl.json` | `/usr/share/rpcd/acl.d/luci-app-wifi-cache-watchd.json` | ACL для ubus-методов выше. |
 | `luci-app-wifi-cache-watchd.menu.json` | `/usr/share/luci/menu.d/luci-app-wifi-cache-watchd.json` | Пункт меню `Status → Wi-Fi Cache Watchdog`. |
-| `wifi_cache_watchd.js` | `/www/luci-static/resources/view/wifi_cache_watchd.js` | Страница LuCI: пояснение (RU), статус/автозапуск, переключатель режима, таблица живых счётчиков, live-лог. |
+| `wifi_cache_watchd.js` | `/www/luci-static/resources/view/wifi_cache_watchd.js` | Страница LuCI: пояснение (RU), статус/автозапуск, переключатель режима, таблица живых счётчиков, список подключённых устройств с раскрывающимися по клику строками (полные характеристики: сигнал/шум, rx/tx rate, аптайм, лиза), live-лог. |
 | `build_release.sh` | — (только на компьютере разработки) | Собирает всё выше в `wifi_cache_watchd.tar.gz` с путями роутера внутри архива. |
 | `INSTALL.md` | — | Инструкция для этой вкладки отдельно (короткая, только команды). |
 

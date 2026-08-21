@@ -10,6 +10,7 @@
 
 BIN_CLEAR=/usr/bin/clear_net_cache.sh
 GEN_DIR=/tmp/.wifi_cache_watchd_gen
+CONNECTED_DIR=/tmp/.wcw_connected
 DEBOUNCE="${WIFI_CACHE_WATCHD_DEBOUNCE:-1}"   # seconds of quiet time before firing
 LOGTAG="wifi_cache_watchd"
 
@@ -19,6 +20,13 @@ log() {
 
 mkdir -p "$GEN_DIR"
 rm -f "$GEN_DIR"/*  2>/dev/null
+
+# Per-MAC "connected since" timestamps, used by the rpcd `clients` method for
+# the uptime column. Cleared on (re)start: any client that was already
+# connected before this restart will get a fresh timestamp on its next
+# natural assoc event rather than a stale/fabricated one.
+mkdir -p "$CONNECTED_DIR"
+rm -f "$CONNECTED_DIR"/*  2>/dev/null
 
 # Coalesces bursts of events into a single trailing-edge run, keyed PER CLIENT
 # MAC: each call bumps that MAC's own generation counter, so a rapid
@@ -64,6 +72,15 @@ ubus listen 'hostapd.*' 2>/dev/null | while IFS= read -r LINE; do
     [ -n "$IFACE" ] || IFACE=unknown
 
     MAC=$(printf '%s' "$LINE" | sed -n 's/.*"address" *: *"\([0-9A-Fa-f:]*\)".*/\1/p')
+
+    if [ -n "$MAC" ]; then
+        MKEY=$(printf '%s' "$MAC" | tr 'A-Z' 'a-z' | tr -dc 'a-z0-9')
+        if [ "$EVT" = "assoc" ]; then
+            date +%s > "$CONNECTED_DIR/$MKEY" 2>/dev/null
+        else
+            rm -f "$CONNECTED_DIR/$MKEY" 2>/dev/null
+        fi
+    fi
 
     log "event received: $EVT on $IFACE mac=${MAC:-unknown}"
     schedule_run "$EVT" "$IFACE" "$MAC"

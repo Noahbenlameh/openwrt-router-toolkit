@@ -6,6 +6,7 @@
 #   log()             -> tail of this tool's syslog entries
 #   action({name})    -> start|stop|enable|disable the service
 #   set_mode({mode})  -> persist cleanup scope: wifi | lan | both
+#   clients()         -> full list of currently known Wi-Fi + LAN clients
 
 . /usr/share/libubox/jshn.sh
 
@@ -14,6 +15,8 @@ TAG=wifi_cache_watchd
 LEASEFILE=/tmp/dhcp.leases
 LOGTMP=/tmp/.wcw_rpcd_logtmp
 MODE_FILE=/etc/wifi_cache_watchd.mode
+CONNECTED_DIR=/tmp/.wcw_connected
+CLIENTS_RAW=/tmp/.wcw_clients_raw
 
 is_running() {
     pgrep -f wifi_cache_watchd.sh >/dev/null 2>&1
@@ -92,6 +95,118 @@ do_action() {
     json_dump
 }
 
+# Classify a MAC as "wifi" or "lan" by the physical bridge port it's seen on
+# (bridge fdb), same logic as clear_net_cache.sh's classify_mac.
+classify_mac() {
+    _mac=$(printf '%s' "$1" | tr 'A-Z' 'a-z')
+    if ! command -v bridge >/dev/null 2>&1; then
+        echo unknown
+        return
+    fi
+    _dev=$(bridge fdb show 2>/dev/null | awk -v m="$_mac" 'tolower($1)==m && $2=="dev" {print $3; exit}')
+    [ -n "$_dev" ] || { echo unknown; return; }
+    for _w in $WIFI_IFACES; do
+        [ "$_dev" = "$_w" ] && { echo wifi; return; }
+    done
+    echo lan
+}
+
+do_clients() {
+    : > "$CLIENTS_RAW"
+    WIFI_IFACES=$(ubus list 2>/dev/null | sed -n 's/^hostapd\.//p')
+    SEEN_MACS=""
+
+    for IFACE in $WIFI_IFACES; do
+        SSID=""
+        SI_JSON=$(ubus call iwinfo info "{\"device\":\"$IFACE\"}" 2>/dev/null)
+        if [ -n "$SI_JSON" ]; then
+            json_load "$SI_JSON"
+            json_get_var SSID ssid
+        fi
+
+        AL_JSON=$(ubus call iwinfo assoclist "{\"device\":\"$IFACE\"}" 2>/dev/null)
+        [ -n "$AL_JSON" ] || continue
+
+        json_load "$AL_JSON"
+        json_select results 2>/dev/null
+        json_get_keys KEYS
+
+        for K in $KEYS; do
+            json_load "$AL_JSON"
+            json_select results
+            json_select "$K"
+            MAC=""; SIGNAL=0; NOISE=0; INACTIVE=0
+            json_get_var MAC mac
+            json_get_var SIGNAL signal
+            json_get_var NOISE noise
+            json_get_var INACTIVE inactive
+
+            [ -n "$MAC" ] || continue
+            NMAC=$(printf '%s' "$MAC" | tr 'A-Z' 'a-z')
+            SEEN_MACS="$SEEN_MACS $NMAC"
+
+            RXRATE=$(printf '%s' "$AL_JSON" | jsonfilter -e "@.results[$K].rx.rate" 2>/dev/null)
+            TXRATE=$(printf '%s' "$AL_JSON" | jsonfilter -e "@.results[$K].tx.rate" 2>/dev/null)
+
+            SINCE_KEY=$(printf '%s' "$NMAC" | tr -dc 'a-z0-9')
+            CSINCE=$(cat "$CONNECTED_DIR/$SINCE_KEY" 2>/dev/null || echo 0)
+
+            printf 'wifi\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+                "$NMAC" "$IFACE" "$SSID" "${SIGNAL:-0}" "${NOISE:-0}" "${RXRATE:-0}" "${TXRATE:-0}" "${INACTIVE:-0}" "${CSINCE:-0}" \
+                >> "$CLIENTS_RAW"
+        done
+    done
+
+    if [ -f "$LEASEFILE" ]; then
+        while IFS=' ' read -r LEXP LMAC LIP LHOST LCID; do
+            [ -n "$LMAC" ] || continue
+            NMAC=$(printf '%s' "$LMAC" | tr 'A-Z' 'a-z')
+            case " $SEEN_MACS " in
+                *" $NMAC "*) continue ;;
+            esac
+            CLASS=$(classify_mac "$NMAC")
+            [ "$CLASS" = "lan" ] || continue
+            printf 'lan\t%s\t\t\t0\t0\t0\t0\t0\t0\n' "$NMAC" >> "$CLIENTS_RAW"
+        done < "$LEASEFILE"
+    fi
+
+    TAB=$(printf '\t')
+    json_init
+    json_add_array clients
+    while IFS="$TAB" read -r TYPE MAC IFACE SSID SIGNAL NOISE RXRATE TXRATE INACTIVE CSINCE; do
+        [ -n "$MAC" ] || continue
+        IP=""; HOST=""; LEXPIRES=0
+        if [ -f "$LEASEFILE" ]; then
+            LEASE_LINE=$(awk -v m="$MAC" 'tolower($2)==m {print; exit}' "$LEASEFILE")
+            if [ -n "$LEASE_LINE" ]; then
+                LEXPIRES=$(echo "$LEASE_LINE" | awk '{print $1}')
+                IP=$(echo "$LEASE_LINE" | awk '{print $3}')
+                HOST=$(echo "$LEASE_LINE" | awk '{print $4}')
+                [ "$HOST" = "*" ] && HOST=""
+            fi
+        fi
+
+        json_add_object ""
+        json_add_string mac "$MAC"
+        json_add_string type "$TYPE"
+        json_add_string iface "$IFACE"
+        json_add_string ssid "$SSID"
+        json_add_string ip "$IP"
+        json_add_string hostname "$HOST"
+        json_add_int signal "${SIGNAL:-0}"
+        json_add_int noise "${NOISE:-0}"
+        json_add_int rx_rate_kbit "${RXRATE:-0}"
+        json_add_int tx_rate_kbit "${TXRATE:-0}"
+        json_add_int inactive_ms "${INACTIVE:-0}"
+        json_add_int connected_since "${CSINCE:-0}"
+        json_add_int lease_expires "${LEXPIRES:-0}"
+        json_close_object
+    done < "$CLIENTS_RAW"
+    json_close_array
+    json_dump
+    rm -f "$CLIENTS_RAW"
+}
+
 do_set_mode() {
     read -r INPUT
     NEWMODE=""
@@ -115,7 +230,7 @@ do_set_mode() {
 
 case "$1" in
     list)
-        echo '{ "status": {}, "log": {}, "action": { "name": "str" }, "set_mode": { "mode": "str" } }'
+        echo '{ "status": {}, "log": {}, "action": { "name": "str" }, "set_mode": { "mode": "str" }, "clients": {} }'
         ;;
     call)
         case "$2" in
@@ -123,6 +238,7 @@ case "$1" in
             log) do_log ;;
             action) do_action ;;
             set_mode) do_set_mode ;;
+            clients) do_clients ;;
             *) echo '{}'; exit 1 ;;
         esac
         ;;
