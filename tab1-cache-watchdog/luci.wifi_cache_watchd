@@ -17,6 +17,7 @@ LOGTMP=/tmp/.wcw_rpcd_logtmp
 MODE_FILE=/etc/wifi_cache_watchd.mode
 CONNECTED_DIR=/tmp/.wcw_connected
 CLIENTS_RAW=/tmp/.wcw_clients_raw
+RESULT_FILE=/tmp/.wcw_last_result
 
 is_running() {
     pgrep -f wifi_cache_watchd.sh >/dev/null 2>&1
@@ -48,6 +49,12 @@ do_status() {
     RUNNING=0; is_running && RUNNING=1
     ENABLED=0; is_enabled && ENABLED=1
 
+    LR_TIME=0; LR_RESULT=""; LR_REASON=""; LR_IFACE=""; LR_MAC=""
+    if [ -f "$RESULT_FILE" ]; then
+        _tab=$(printf '\t')
+        IFS="$_tab" read -r LR_TIME LR_RESULT LR_REASON LR_IFACE LR_MAC < "$RESULT_FILE"
+    fi
+
     json_init
     json_add_boolean running "$RUNNING"
     json_add_boolean enabled "$ENABLED"
@@ -60,6 +67,11 @@ do_status() {
     json_add_int dhcp_leases "$DHCP_COUNT"
     json_add_string dns_cache_size "$DNS_CACHE"
     json_add_string last_event "$LAST_EVENT"
+    json_add_int last_result_time "${LR_TIME:-0}"
+    json_add_string last_result "${LR_RESULT:-}"
+    json_add_string last_result_reason "${LR_REASON:-}"
+    json_add_string last_result_iface "${LR_IFACE:-}"
+    json_add_string last_result_mac "${LR_MAC:-}"
     json_dump
 }
 

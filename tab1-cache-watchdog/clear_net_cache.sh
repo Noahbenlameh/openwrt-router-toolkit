@@ -23,6 +23,15 @@ TRIGGER_MAC="${3:-}"
 LOGTAG="wifi_cache_watchd"
 LEASEFILE=/tmp/dhcp.leases
 MODE_FILE=/etc/wifi_cache_watchd.mode
+RESULT_FILE=/tmp/.wcw_last_result
+
+# File-based flags (not shell vars) so they survive being set from inside a
+# piped `while read` subshell (the lan-mode client loop below runs in one).
+FLAG_PARTIAL=/tmp/.wcw_flag_partial
+FLAG_FAILED=/tmp/.wcw_flag_failed
+rm -f "$FLAG_PARTIAL" "$FLAG_FAILED"
+mark_partial() { : > "$FLAG_PARTIAL"; }
+mark_failed()  { : > "$FLAG_FAILED"; }
 
 # Set to 0 to skip the vm.drop_caches step (it's unrelated to networking and
 # can cause a brief slowdown on low-RAM devices; kept optional per request).
@@ -93,21 +102,29 @@ clean_one_client() {
 
     if [ -z "$_ip" ]; then
         log "[$_label] skip $_mac: could not resolve an IP (no lease, no neighbor entry)"
+        mark_failed
         return
     fi
 
     if command -v conntrack >/dev/null 2>&1; then
-        conntrack -D -s "$_ip" >/dev/null 2>&1
-        conntrack -D -d "$_ip" >/dev/null 2>&1
-        log "[$_label] conntrack entries for $_ip ($_mac) deleted"
+        _ct_hit=1
+        conntrack -D -s "$_ip" >/dev/null 2>&1 && _ct_hit=0
+        conntrack -D -d "$_ip" >/dev/null 2>&1 && _ct_hit=0
+        if [ "$_ct_hit" = 0 ]; then
+            log "[$_label] conntrack entries for $_ip ($_mac) deleted"
+        else
+            log "[$_label] conntrack: no matching entries for $_ip ($_mac) (normal for a fresh connection)"
+        fi
     else
         log "[$_label] conntrack flush skipped for $_ip ($_mac): conntrack tool not installed (opkg install conntrack)"
+        mark_partial
     fi
 
     if ip neigh flush to "$_ip" >/dev/null 2>&1; then
         log "[$_label] ARP/ND entry for $_ip ($_mac) flushed"
     else
         log "[$_label] warning: 'ip neigh flush to $_ip' failed or unsupported"
+        mark_partial
     fi
 
     if [ -f "$LEASEFILE" ] && grep -qi "$_mac" "$LEASEFILE"; then
@@ -126,12 +143,14 @@ if [ "$MODE" = "wifi" ] || [ "$MODE" = "both" ]; then
         clean_one_client "$TRIGGER_MAC" "wifi"
     else
         log "[wifi] skip: no trigger MAC available for this event"
+        mark_failed
     fi
 fi
 
 if [ "$MODE" = "lan" ] || [ "$MODE" = "both" ]; then
     if ! command -v bridge >/dev/null 2>&1; then
         log "[lan] skipped entirely: 'bridge' command not found (opkg install ip-full) -- cannot tell wired clients apart from Wi-Fi ones"
+        mark_partial
     elif [ ! -f "$LEASEFILE" ]; then
         log "[lan] skipped: no $LEASEFILE to enumerate known clients from"
     else
@@ -154,6 +173,7 @@ if [ "$ENABLE_DNS_CACHE_CLEAR" = "1" ]; then
         log "dnsmasq sent SIGHUP directly (DNS cache cleared for all clients)"
     else
         log "warning: dnsmasq not found or not reloadable"
+        mark_partial
     fi
 else
     log "DNS cache clear skipped (ENABLE_DNS_CACHE_CLEAR=0)"
@@ -165,5 +185,15 @@ if [ "$ENABLE_DROP_CACHES" = "1" ] && [ -w /proc/sys/vm/drop_caches ]; then
     log "kernel filesystem cache dropped (vm.drop_caches=3)"
 fi
 
-log "cache clear finished: reason=$REASON iface=$IFNAME mode=$MODE"
+if [ -f "$FLAG_FAILED" ]; then
+    RESULT=failed
+elif [ -f "$FLAG_PARTIAL" ]; then
+    RESULT=partial
+else
+    RESULT=ok
+fi
+rm -f "$FLAG_PARTIAL" "$FLAG_FAILED"
+printf '%s\t%s\t%s\t%s\t%s\n' "$(date +%s)" "$RESULT" "$REASON" "$IFNAME" "${TRIGGER_MAC:-unknown}" > "$RESULT_FILE"
+
+log "cache clear finished: reason=$REASON iface=$IFNAME mode=$MODE result=$RESULT"
 exit 0

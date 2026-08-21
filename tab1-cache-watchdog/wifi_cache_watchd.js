@@ -75,6 +75,7 @@ return view.extend({
 	render: function (initialStatus) {
 		var statusBadge = E('span', { 'class': 'label' }, '');
 		var enabledBadge = E('span', { 'class': 'label' }, '');
+		var resultBadge = E('span', { 'class': 'label' }, '');
 		var logBox = E('textarea', {
 			'id': 'wcw_log',
 			'style': 'width:100%; height:320px; font-family:monospace; font-size:12px; white-space:pre;',
@@ -105,6 +106,24 @@ return view.extend({
 
 			enabledBadge.textContent = st.enabled ? _('autostart: on') : _('autostart: off');
 			enabledBadge.className = 'label ' + (st.enabled ? 'label-success' : 'label-warning');
+
+			if (!st.last_result) {
+				resultBadge.textContent = _('last cleanup: no events yet');
+				resultBadge.className = 'label';
+			} else {
+				var ago = st.last_result_time ? fmtDuration(Date.now() / 1000 - st.last_result_time) + ' ' + _('ago') : '';
+				var what = st.last_result_reason === 'assoc' ? _('connect')
+					: st.last_result_reason === 'disassoc' ? _('disconnect')
+					: st.last_result_reason;
+				var cls = st.last_result === 'ok' ? 'label-success'
+					: st.last_result === 'partial' ? 'label-warning'
+					: 'label-danger';
+				var mark = st.last_result === 'ok' ? '✓' : st.last_result === 'partial' ? '⚠' : '✗';
+				resultBadge.textContent = mark + ' ' + _('last cleanup') + ' (' + what + ', ' + ago + '): ' +
+					(st.last_result === 'ok' ? _('success') : st.last_result === 'partial' ? _('partial - see log') : _('failed - see log'));
+				resultBadge.className = 'label ' + cls;
+				resultBadge.title = 'MAC: ' + (st.last_result_mac || '-') + ', iface: ' + (st.last_result_iface || '-');
+			}
 
 			rows.ct.textContent = st.conntrack_count + ' / ' + st.conntrack_max;
 			rows.arp.textContent = st.arp_count;
@@ -307,6 +326,10 @@ return view.extend({
 			E('div', { 'class': 'cbi-section' }, [
 				E('p', {}, [ statusBadge, ' ', enabledBadge ]),
 				E('div', { 'class': 'cbi-page-actions' }, [ startBtn, ' ', stopBtn, ' ', enableBtn, ' ', disableBtn ])
+			]),
+			E('div', { 'class': 'cbi-section' }, [
+				E('h3', {}, _('Результат последней очистки')),
+				E('p', {}, resultBadge)
 			]),
 			E('div', { 'class': 'cbi-section' }, [
 				E('h3', {}, _('Cleanup scope')),
