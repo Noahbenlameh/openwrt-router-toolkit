@@ -1,9 +1,17 @@
 #!/bin/sh
-# wifi_cache_watchd.sh - listens for hostapd assoc/disassoc ubus events on
-# ANY wireless interface (works regardless of how many VAPs/BSSIDs exist,
-# no dependency on /etc/config/wireless contents) and triggers
+# wifi_cache_watchd.sh - watches the system log for hostapd's
+# AP-STA-CONNECTED / AP-STA-DISCONNECTED lines (emitted for ANY VAP on ANY
+# radio, no dependency on /etc/config/wireless contents) and triggers
 # clear_net_cache.sh, with debounce so a rapid reassociate doesn't fire the
 # cleanup multiple times back-to-back.
+#
+# Originally used `ubus listen 'hostapd.*'`, but that requires hostapd's
+# ubus notify support, which turned out to be MISSING on some real-world
+# builds (confirmed absent on wpad-basic-mbedtls, OpenWrt 24.10.3) even
+# though the hostapd.<iface> ubus object itself still exists. hostapd's
+# plain syslog output (AP-STA-CONNECTED/DISCONNECTED) is present on every
+# build regardless of ubus notify support, so it's used as the event
+# source instead -- more portable, not just a workaround for one router.
 #
 # Meant to be run under procd via /etc/init.d/wifi_cache_watchd, but can also
 # be run directly in a foreground shell for testing.
@@ -51,27 +59,30 @@ schedule_run() {
     ) &
 }
 
-log "started, listening on ubus for hostapd assoc/disassoc events (debounce=${DEBOUNCE}s)"
+log "started, watching syslog for hostapd AP-STA-CONNECTED/DISCONNECTED lines (debounce=${DEBOUNCE}s)"
 
-# Restrict the event stream to hostapd.* objects only -- this naturally
-# excludes wired interfaces and any non-Wi-Fi ubus traffic.
-ubus listen 'hostapd.*' 2>/dev/null | while IFS= read -r LINE; do
+# hostapd logs lines like:
+#   hostapd: phy0-ap4: AP-STA-CONNECTED 06:6c:9a:66:12:35 auth_alg=open
+#   hostapd: phy0-ap4: AP-STA-DISCONNECTED 06:6c:9a:66:12:35
+# for every VAP on every radio, unconditionally, regardless of ubus notify
+# support in the installed hostapd/wpad build.
+logread -f 2>/dev/null | while IFS= read -r LINE; do
     case "$LINE" in
-        *'"hostapd.'*'"disassoc"'*)
-            EVT=disassoc
-            ;;
-        *'"hostapd.'*'"assoc"'*)
+        *' hostapd: '*': AP-STA-CONNECTED '*)
             EVT=assoc
+            ;;
+        *' hostapd: '*': AP-STA-DISCONNECTED '*)
+            EVT=disassoc
             ;;
         *)
             continue
             ;;
     esac
 
-    IFACE=$(printf '%s' "$LINE" | sed -n 's/.*"hostapd\.\([A-Za-z0-9_.:-]*\)".*/\1/p')
+    IFACE=$(printf '%s' "$LINE" | sed -n 's/.*hostapd: \([^:]*\): AP-STA-[A-Z]*.*/\1/p')
     [ -n "$IFACE" ] || IFACE=unknown
 
-    MAC=$(printf '%s' "$LINE" | sed -n 's/.*"address" *: *"\([0-9A-Fa-f:]*\)".*/\1/p')
+    MAC=$(printf '%s' "$LINE" | sed -n 's/.*AP-STA-[A-Z]* \([0-9A-Fa-f:]*\).*/\1/p')
 
     if [ -n "$MAC" ]; then
         MKEY=$(printf '%s' "$MAC" | tr 'A-Z' 'a-z' | tr -dc 'a-z0-9')
@@ -86,5 +97,5 @@ ubus listen 'hostapd.*' 2>/dev/null | while IFS= read -r LINE; do
     schedule_run "$EVT" "$IFACE" "$MAC"
 done
 
-log "ubus listen exited (hostapd/ubus daemon restarted or gone) -- procd will respawn this instance"
+log "logread -f exited (syslog daemon restarted or gone) -- procd will respawn this instance"
 exit 1

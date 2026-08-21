@@ -77,7 +77,7 @@ flowchart TB
             JS1["wifi_cache_watchd.js\n(LuCI view)"]
             RPCD1["luci.wifi_cache_watchd\n(rpcd: status/log/action/set_mode)"]
             INIT1["/etc/init.d/wifi_cache_watchd"]
-            DAEMON["wifi_cache_watchd.sh\n(ubus listen hostapd.*, debounce по MAC)"]
+            DAEMON["wifi_cache_watchd.sh\n(logread -f, парсит AP-STA-CONNECTED/DISCONNECTED, debounce по MAC)"]
             CLEAR["clear_net_cache.sh"]
             MODE["/etc/wifi_cache_watchd.mode\n(wifi / lan / both)"]
 
@@ -91,7 +91,7 @@ flowchart TB
             CLEAR --> DNS["dnsmasq restart (глобально, весь кэш DNS)"]
         end
 
-        HOSTAPD["hostapd\n(любая VAP на радио)"] -->|ubus notify assoc/disassoc| DAEMON
+        HOSTAPD["hostapd\n(любая VAP на радио)"] -->|syslog: AP-STA-CONNECTED/DISCONNECTED| DAEMON
     end
 
     Browser -->|https/http| JS2
@@ -109,7 +109,7 @@ flowchart TB
 | Файл в папке | Путь на роутере | Роль |
 |---|---|---|
 | `clear_net_cache.sh` | `/usr/bin/clear_net_cache.sh` | Сама логика очистки: conntrack/ARP-ND/DHCP-лиза по конкретному клиенту, DNS-кэш глобально, опционально `drop_caches`. Режим (`wifi`/`lan`/`both`) читает из `/etc/wifi_cache_watchd.mode`. |
-| `wifi_cache_watchd.sh` | `/usr/sbin/wifi_cache_watchd.sh` | Демон: `ubus listen 'hostapd.*'`, парсит assoc/disassoc + MAC клиента, дебаунс по MAC (1 сек, схлопывает быстрые переподключения), вызывает `clear_net_cache.sh`. Также пишет/чистит `/tmp/.wcw_connected/<mac>` (timestamp коннекта) для расчёта аптайма в списке клиентов. |
+| `wifi_cache_watchd.sh` | `/usr/sbin/wifi_cache_watchd.sh` | Демон: `logread -f`, парсит строки hostapd `AP-STA-CONNECTED`/`AP-STA-DISCONNECTED` (не ubus — см. «Грабли», п.9) + MAC клиента, дебаунс по MAC (1 сек, схлопывает быстрые переподключения), вызывает `clear_net_cache.sh`. Также пишет/чистит `/tmp/.wcw_connected/<mac>` (timestamp коннекта) для расчёта аптайма в списке клиентов. |
 | `wifi_cache_watchd.init` | `/etc/init.d/wifi_cache_watchd` | procd-автозапуск демона. |
 | `luci.wifi_cache_watchd` | `/usr/libexec/rpcd/luci.wifi_cache_watchd` | rpcd-плагин, ubus-объект `luci.wifi_cache_watchd`: `status`, `log`, `action` (start/stop/enable/disable), `set_mode`, `clients` (полный список Wi-Fi+LAN клиентов: MAC/IP/hostname/сигнал/скорость/аптайм/лиза; Wi-Fi-данные через `ubus call iwinfo assoclist`/`info`, LAN — через `bridge fdb` + `dhcp.leases`). |
 | `luci-app-wifi-cache-watchd.acl.json` | `/usr/share/rpcd/acl.d/luci-app-wifi-cache-watchd.json` | ACL для ubus-методов выше. |
@@ -338,6 +338,27 @@ rm -f /tmp/luci-indexcache*
    файлы не трогает). Оба install-флоу сами дописывают туда свои пути;
    бинарные opkg-пакеты (`ttyd`, `conntrack`, `ip-full`) этим способом не
    сохраняются — после реальной прошивки их придётся ставить заново.
+9. **`ubus listen 'hostapd.*'` — НЕ гарантированный источник assoc/disassoc
+   событий.** Изначальная версия демона была на нём построена и полностью
+   молчала на реальном роутере (объект `hostapd.<iface>` в ubus существует,
+   но никаких notify-событий не публикуется) — подтверждено эмпирически на
+   `wpad-basic-mbedtls` (OpenWrt 24.10.3): `ubus listen` без фильтра, во
+   время реального подключения/отключения клиента, дал абсолютно пустой
+   вывод, хотя `hostapd` в это же время исправно писал в syslog
+   `AP-STA-CONNECTED`/`AP-STA-DISCONNECTED` с MAC-адресом. Сейчас демон
+   читает именно syslog (`logread -f`), а не ubus — это работает независимо
+   от того, какая сборка hostapd/wpad стоит, и это не костыль под один
+   роутер, а более портируемый способ в принципе. Если в будущем снова
+   возникнет соблазн вернуться на ubus — сначала проверь
+   `ubus listen` (без фильтра!) во время реального события, вживую, прежде
+   чем на это полагаться.
+10. **При диагностике `ps` может ввести в заблуждение по количеству
+    процессов.** `команда1 | while read ...; done` в ash — это конвейер:
+    правая часть создаёт дочерний subshell форком БЕЗ exec, поэтому в `ps`
+    он показывает ТУ ЖЕ командную строку, что и родитель — выглядит как
+    два разных демона, а на самом деле один логический процесс в двух
+    телах. Авторитетный источник числа реальных инстансов —
+    `ubus call service list '{"name":"<имя-сервиса>"}'`, а не `ps`.
 
 ---
 
